@@ -254,24 +254,20 @@ def parse_nubank(pdf_bytes: bytes, cfg: dict) -> ParseResult:
 def parse_bb(pdf_bytes: bytes, cfg: dict) -> ParseResult:
     lines = extract_text_lines(pdf_bytes)
 
-    # 1) "Fatura fechada em: dd/mm/aaaa"
+    # 1) pegar data de fechamento "Fatura fechada em: dd/mm/aaaa"
     closing_date = None
-    for ln in lines[:200]:
+    for ln in lines[:120]:
         m = re.search(cfg["header"]["closed_regex"], ln, flags=re.IGNORECASE)
         if m:
             try:
                 closing_date = parser.parse(m.group("closed"), dayfirst=True)
-                break
             except Exception:
                 pass
+    # fallback: hoje
     if not closing_date:
         closing_date = datetime.today()
 
-    close_m = closing_date.month
-    close_y = closing_date.year
-    prev_m = 12 if close_m == 1 else close_m - 1
-
-    # 2) Somente "Detalhes da fatura"
+    # 2) manter apenas a seção Detalhes da fatura
     section_lines = keep_only_between_markers(
         lines,
         start_markers=cfg["section"]["start_markers"],
@@ -280,7 +276,6 @@ def parse_bb(pdf_bytes: bytes, cfg: dict) -> ParseResult:
 
     row_re = re.compile(cfg["row_pattern"], flags=re.IGNORECASE)
     parsed = []
-
     for ln in section_lines:
         m = row_re.search(ln)
         if not m:
@@ -289,58 +284,37 @@ def parse_bb(pdf_bytes: bytes, cfg: dict) -> ParseResult:
         raw_desc = m.group("desc").strip()
         raw_amount = m.group("amount").strip()
 
-        # 3) Data com regra especial
-        #    a) Se vier SEM ano (ex.: 18/11):
-        #       - definimos o ano para NÃO ficar "no futuro" do fechamento:
-        #         year = close_y se month <= close_m, senão year = close_y - 1
-        #       - depois calculamos months_diff; se >=2, ajustamos para mês do fechamento.
-        #    b) Se vier COM ano:
-        #       - se months_diff >= 2 (muito antiga) ou months_diff < 0 (futura), ajusta para mês/ano do fechamento.
-        mdate = re.match(r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?', raw_date)
-        no_year = False
-        if mdate:
-            day = int(mdate.group(1))
-            month = int(mdate.group(2))
-            if mdate.group(3):
-                year = int(mdate.group(3))
-                if year < 100:
-                    year += 2000
-            else:
-                no_year = True
-                year = close_y if month <= close_m else close_y - 1
-            try:
-                tx_date = datetime(year, month, day)
-            except ValueError:
-                continue
-        else:
-            try:
-                tx_date = parser.parse(raw_date, dayfirst=True)
-            except Exception:
-                continue
+        # Data com regra especial de parceladas (se anterior >1 mês ao fechamento → usa mês/ano do fechamento)
+        try:
+            tx_date = parser.parse(raw_date, dayfirst=True)
+        except Exception:
+            continue
 
-        if no_year:
-            # Já garantimos que não fica "no futuro". Agora aplicamos a janela de até 1 mês.
-            months_diff = (close_y - tx_date.year) * 12 + (close_m - tx_date.month)
-            if months_diff >= 2:
-                tx_date = tx_date.replace(month=close_m, year=close_y)
-        else:
-            months_diff = (close_y - tx_date.year) * 12 + (close_m - tx_date.month)
-            if months_diff >= 2 or months_diff < 0:
-                tx_date = tx_date.replace(month=close_m, year=close_y)
+        # se a diferença de meses for >= 2 (anterior a mais de 1 mês), ajustar mês/ano para o do fechamento
+        months_diff = (closing_date.year - tx_date.year) * 12 + (closing_date.month - tx_date.month)
+        if months_diff >= 2:
+            tx_date = tx_date.replace(month=closing_date.month, year=closing_date.year)
 
-        # 4) Valor (regra do cartão: inverter sinal)
         val = normalize_decimal_pt(raw_amount)
-        val = -val
+        val = -val  # regra: inverter sinal
 
-        # 5) Monta linha (a UI depois já reduz para data/descricao/valor)
+        # parcelas ("PARC 03/08" etc.)
+        parc_atual, parc_total = "", ""
+        pm = re.search(cfg.get("installment_regex", r"PARC\s*(\d{1,2})\/(\d{1,2})"), raw_desc, flags=re.IGNORECASE)
+        if pm:
+            parc_atual, parc_total = pm.group(1), pm.group(2)
+
         parsed.append({
             "data": tx_date.strftime("%d/%m/%Y"),
             "descricao": raw_desc,
             "valor": f"{val:.2f}".replace(".", ","),
+            "parcela_atual": parc_atual,
+            "parcelas_totais": parc_total,
+            "categoria": "",
+            "observacao": f"BB | Fatura fechada em {closing_date.strftime('%d/%m/%Y')}"
         })
 
     return ParseResult(parsed)
-
 
 
 def parse_sumup(pdf_bytes: bytes, cfg: dict) -> ParseResult:
@@ -372,8 +346,20 @@ def parse_sumup(pdf_bytes: bytes, cfg: dict) -> ParseResult:
         # data extraída dos 8 primeiros dígitos do código (aaaa mm dd)
         date_str = yyyymmdd_to_ddmmyyyy(code[:8])
 
+        def _neg_from_context(line: str, token: str) -> bool:
+            idx = line.find(token)
+            if idx != -1:
+                before = line[max(0, idx - 6):idx]
+                return ("-" in before) or ("−" in before)
+            return False
+
         total_val = normalize_decimal_pt(raw_total)
-        fee_val = normalize_decimal_pt(raw_fee)  # já vem negativo no PDF (ex.: -R$31,53)
+        if total_val >= 0 and _neg_from_context(ln, raw_total):
+            total_val = -total_val
+
+        fee_val = normalize_decimal_pt(raw_fee)
+        if fee_val >= 0 and _neg_from_context(ln, raw_fee):
+            fee_val = -fee_val  # garante negativo quando o '-' aparece antes do R$
 
         # regra do Heitor: não inverter no SumUp; duplicar lançamentos (Total e Taxas)
         parsed.append({
