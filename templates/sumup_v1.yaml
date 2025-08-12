@@ -1,0 +1,7 @@
+bank: "sumup"
+version: "v1"
+section:
+  start_markers: ["DEPOSITOS RECEBIDOS", "DEPÓSITOS RECEBIDOS"]
+  end_markers: []
+# Captura: code | tipo(ignorado) | total | fee | deposit(ignorar)
+row_pattern: '(?P<code>\d{18,})\s+\d+\s+R\$\s*(?P<total>[-−]?\d{1,3}(?:\.\d{3})*(?:,\d{2}|\.\d{2}))\s+[-−]?R\$\s*(?P<fee>[-−]?\d{1,3}(?:\.\d{3})*(?:,\d{2}|\.\d{2}))\s+R\$\s*(?P<deposit>[-−]?\d{1,3}(?:\.\d{3})*(?:,\d{2}|\.\d{2}))'

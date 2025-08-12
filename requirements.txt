@@ -1,0 +1,7 @@
+streamlit
+pdfplumber
+pandas
+python-dateutil
+pyyaml
+rapidfuzz
+unidecode
