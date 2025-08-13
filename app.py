@@ -114,12 +114,12 @@ def keep_only_between_markers(lines: list[str], start_markers: list[str], end_ma
 # ----------------------
 
 def parse_ptbr_day_month(raw_date, year_hint=None):
-    """Converte datas como '07 FEV' ou '07/02' em datetime(YYYY,MM,DD) usando mapa PT-BR.
-    Não depende do parser para meses abreviados PT-BR.
+    """Converte datas como '07 FEV', '07/02' ou '20 de jan. 2025' em datetime(YYYY,MM,DD).
+    Entende meses PT-BR, aceita token 'de' opcional e abreviações com ponto.
     """
     s = unidecode(str(raw_date)).strip().upper()
 
-    # Normaliza separadores
+    # Normaliza separadores comuns
     s_norm = s.replace('-', '/').replace('  ', ' ')
 
     months = {
@@ -146,15 +146,22 @@ def parse_ptbr_day_month(raw_date, year_hint=None):
             year = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else int(year_hint or datetime.today().year)
             return datetime(year, month, day)
 
-    # Caso com mês por extenso/abreviado: "07 FEV" ou "7 FEVEREIRO"
-    tokens = s.split()
+    # Caso com mês por extenso/abreviado, com ou sem 'de': "20 de jan. 2025", "07 FEV 2025"
+    tokens_raw = s.replace('.', '').split()
+    tokens = [t for t in tokens_raw if t != 'DE']
     if len(tokens) >= 2 and tokens[0].isdigit():
         day = int(tokens[0])
         mon_token = tokens[1]
         mon_key = mon_token if mon_token in months else mon_token[:3]
         if mon_key in months:
             month = months[mon_key]
-            year = int(year_hint or datetime.today().year)
+            year = None
+            # tenta achar ano no próximo token
+            if len(tokens) >= 3 and tokens[2].isdigit() and len(tokens[2]) in (2, 4):
+                year = int(tokens[2])
+                if year < 100:
+                    year += 2000
+            year = year or int(year_hint or datetime.today().year)
             return datetime(year, month, day)
 
     # Fallback: tenta parser padrão
@@ -384,6 +391,51 @@ def parse_sumup(pdf_bytes: bytes, cfg: dict) -> ParseResult:
     return ParseResult(parsed)
 
 
+def parse_inter(pdf_bytes: bytes, cfg: dict) -> ParseResult:
+    lines = extract_text_lines(pdf_bytes)
+
+    # Apenas a seção "Despesas da fatura"
+    section_lines = keep_only_between_markers(
+        lines,
+        start_markers=cfg["section"]["start_markers"],
+        end_markers=cfg["section"].get("end_markers", []),
+    )
+
+    row_re = re.compile(cfg["row_pattern"], flags=re.IGNORECASE)
+    parsed = []
+
+    for ln in section_lines:
+        m = row_re.search(ln)
+        if not m:
+            continue
+        raw_date = m.group("date").strip()
+        raw_desc = m.group("desc").strip()
+        raw_amount = m.group("amount").strip()
+        sign = (m.group("sign") or "").strip()
+
+        # Data no formato: "20 de jan. 2025" → 20/01/2025
+        try:
+            dt = parse_ptbr_day_month(raw_date)
+        except Exception:
+            continue
+
+        # Valor (sem inversão global). Regra: '+' explicitamente positivo; '-' negativo; sem sinal → negativo.
+        val = normalize_decimal_pt(raw_amount)
+        if sign == '+':
+            pass  # positivo
+        else:
+            # '-' ou ausente → negativo
+            val = -val
+
+        parsed.append({
+            "data": dt.strftime("%d/%m/%Y"),
+            "descricao": raw_desc,
+            "valor": f"{val:.2f}".replace(".", ","),
+        })
+
+    return ParseResult(parsed)
+
+
 # ----------------------
 # UI – seleção e processamento
 # ----------------------
@@ -400,6 +452,10 @@ BANKS = {
     "SumUp (v1)": {
         "template": "templates/sumup_v1.yaml",
         "parser": parse_sumup,
+    },
+    "Banco Inter (v1)": {
+        "template": "templates/inter_v1.yaml",
+        "parser": parse_inter,
     },
 }
 

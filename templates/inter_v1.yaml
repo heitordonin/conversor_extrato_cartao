@@ -1,0 +1,9 @@
+bank: "inter"
+version: "v1"
+section:
+  start_markers: ["DESPESAS DA FATURA"]   # âncora a partir da 3ª página (no seu PDF)
+  end_markers: []                         # pode deixar vazio por enquanto
+# Linha do tipo:
+# "20 de jan. 2025 PAGAMENTO ON LINE - + R$ 375,30"
+# "01 de fev. 2025 DL *GOOGLE ADS59515080 - R$ 608,00"
+row_pattern: '(?P<date>\d{1,2}\s+de\s+[A-Za-zçÇ\.]+\.?\s+\d{4})\s+(?P<desc>.+?)\s+(?P<sign>[+\-−])?\s*R\$\s*(?P<amount>\d{1,3}(?:\.\d{3})*(?:,\d{2}|\.\d{2}))'
